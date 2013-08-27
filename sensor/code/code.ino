@@ -1,29 +1,33 @@
 //----------------------------------------------------------------
+// Street Pulse Sensor
+//----------------------------------------------------------------
 /*   
-   Hardware setup:
-   MMA8452 Breakout ------------ Arduino
-       3.3V --------------------- 3.3V
-       SDA ----------------------- A4
-       SCL ----------------------- A5
-       INT2 ---------------------- D3
-       INT1 ---------------------- D2
-       GND ---------------------- GND
-       
-    NRF Hardware SPI:
-       MISO ->  D12 purple
-       MOSI ->  D11 blue
-       SCK  ->   D13 grey
-       CSN  ->  D10 brown
-       CE    ->     D8 green (chip is active if CE is high)
-       POWR -> D9 red
-
-*/
+ Hardware setup:
+ MMA8452 Breakout ------------ Arduino
+ 3.3V --------------------- 3.3V
+ SDA ----------------------- A4
+ SCL ----------------------- A5
+ INT2 ---------------------- D3
+ INT1 ---------------------- D2
+ GND ---------------------- GND
+ 
+ NRF Hardware SPI:
+ MISO ->  D12 purple
+ MOSI ->  D11 blue
+ SCK  ->   D13 grey
+ CSN  ->  D10 brown
+ CE    ->     D8 green (chip is active if CE is high)
+ POWR -> D9 red
+ 
+ */
 
 
 //----------------------------------------------------------------
 #include "i2c.h"  // not the wire library, can't use pull-ups
 #include <avr/sleep.h>
- #include <avr/wdt.h> 
+#include <avr/wdt.h> 
+#include <avr/power.h>
+
 #include <SPI.h>
 #include "nRF24L01.h"
 #include "RF24.h"
@@ -32,6 +36,8 @@
 #define SENSOR_ADDRESS 2 
 
 //-----------------------------------------------------------------
+#define digitalPin0   0
+#define digitalPin1   1
 #define digitalPin4   4
 #define digitalPin5   5
 #define digitalPin6   6
@@ -44,7 +50,7 @@
 
 #define  WHO_AM_I                    0x0D 
 #define  ACCELERATOR_NAME            0x2A
-#define  FIRST_ACCELERATOR_ADDRESS   0x1D
+#define  FIRST_ACCELERATOR_ADDRESS   0x1C
 #define  SECOND_ACCELERATOR_ADDRESS  0x1C
 
 #define SERIAL_SPEED 115200
@@ -181,8 +187,6 @@ const byte dataRate    = 0 ;  // output data rate: 0=800Hz, 1=400, 2=200, 3=100,
 const uint64_t baseAddress = BASE_ADDRESS ;
 
 int accelCount[6]              ;  // Stores the 12-bit signed value
-int oldAccelCount[6]         ;  // Stores the 12-bit signed value
-int veryOldAccelCount[6] ;  // Stores the 12-bit signed value
 
 boolean firstAcceleratorPlugged       = false ;
 boolean secondAcceleratorPlugged = false ;
@@ -195,23 +199,39 @@ unsigned long lastInterrupt = millis();
 // --------------------------------------------------------------------------------------------------------------
 // --------------------------------------------------------------------------------------------------------------
 void setup() {
-      wdt_disable();                         // turn off watchdog to save energy
-      digitalWrite(digitalPin4, HIGH);       // turn on pullup resistors to save energy
-      digitalWrite(digitalPin5, HIGH);       // turn on pullup resistors to save energy
-      digitalWrite(digitalPin6, HIGH);       // turn on pullup resistors to save energy
-      digitalWrite(digitalPin7, HIGH);       // turn on pullup resistors to save energy
-          
-      Serial.begin(SERIAL_SPEED);      
-      
-      pinMode      (nrfPower           , OUTPUT) ;
-      digitalWrite  (nrfPower          , LOW   ) ;
-      pinMode      (firstInterruptPin  , INPUT ) ;       // Set up the interrupt pins, active high, push-pull 
-      digitalWrite  (firstInterruptPin , LOW   ) ;
-      pinMode      (secondInterruptPin , INPUT ) ;  digitalWrite  (secondInterruptPin, LOW    )  ;
-       
-       ADCSRA = 0;
-       startAccelerometer();      
-       sleepSensor();
+
+  wdt_disable() ;                               // turn off watchdog to save energy
+  power_timer2_disable() ; 
+  power_timer1_disable() ;  
+  power_usart0_disable() ;
+
+  power_twi_disable(); //I2C com to accelerometer OFF
+  power_spi_disable(); // SPI com to wireless module OFF
+
+  // SERIAL PORT PINS MUST BE NOT SET MANUALLY
+  pinMode      (A0,INPUT); digitalWrite(A0, HIGH);  // set pullup on analog pin 0 
+  pinMode      (A1,INPUT); digitalWrite(A1, HIGH);  // set pullup on analog pin 0 
+  pinMode      (A2,INPUT); digitalWrite(A2, HIGH);  // set pullup on analog pin 0 
+  pinMode      (A3,INPUT); digitalWrite(A3, HIGH);  // set pullup on analog pin 0 
+  pinMode      (A4,INPUT); digitalWrite(A4, HIGH);  // set pullup on analog pin 0 
+  pinMode      (A5,INPUT); digitalWrite(A5, HIGH);  // set pullup on analog pin 0 
+  pinMode      (A6,INPUT); digitalWrite(A6, HIGH);  // set pullup on analog pin 0 
+  pinMode      (A7,INPUT); digitalWrite(A7, HIGH);  // set pullup on analog pin 0 
+  
+  
+  pinMode      (digitalPin4,INPUT);   digitalWrite(digitalPin4, HIGH);       // turn on pullup resistors to save energy
+  pinMode      (digitalPin5,INPUT);    digitalWrite(digitalPin5, HIGH);       // turn on pullup resistors to save energy
+  pinMode      (digitalPin6,INPUT);    digitalWrite(digitalPin6, HIGH);       // turn on pullup resistors to save energy
+  pinMode      (digitalPin7,INPUT);    digitalWrite(digitalPin7, HIGH);       // turn on pullup resistors to save energy
+
+  pinMode      (nrfPower , OUTPUT) ;   digitalWrite  (nrfPower  , LOW   ) ;
+  pinMode      (firstInterruptPin  , INPUT    ) ;    // Set up the interrupt pins, active high, push-pull 
+  digitalWrite  (firstInterruptPin  , LOW       ) ;
+  pinMode      (secondInterruptPin , INPUT ) ;  digitalWrite  (secondInterruptPin, HIGH    )  ;
+
+  setupAccelerometer(TWO_G, 0,FIRST_ACCELERATOR_ADDRESS);  // init the accelerometer 
+  sendDataToServer(1);      
+
 }
 
 
@@ -219,193 +239,115 @@ void setup() {
 // --------------------------------------------------------------------------------------------------------------
 void loop() { 
 
-    if ( !isSendingToServer && binCoverMoves /*&& (millis()-lastInterrupt > 50)*/ ) {
-         isSendingToServer = true    ;
-         readAccelData(accelCount, FIRST_ACCELERATOR_ADDRESS);  // Read the x/y/z adc values
-         //Serial.print(accelCount[2]/5);Serial.print(' ');
-         sendDataToServer(accelCount[2]/5   ); 
-         //if (accelCount[2] < 0 )  sendDataToServer(COVER_FLIPPED); 
-         //else                     sendDataToServer(COVER_OPEN   ); 
-    }
-     if(!firstAcceleratorPlugged) if (startingAccelerometer(FIRST_ACCELERATOR_ADDRESS)) firstAcceleratorPlugged = true;  
+  if  ( !isSendingToServer && binCoverMoves  )   {
+    isSendingToServer = true    ;
+    sendDataToServer(1); 
+    attachInterrupt(0, motionDetected, CHANGE);
+  }
+
+  sleepSensor();
+
 }
+
 
 // --------------------------------------------------------------------------------------------------------------
 void motionDetected(){
-          if ( isSendingToServer ) return;
-          sleep_disable();
-          detachInterrupt(0);
-          binCoverMoves = true;
+  if ( isSendingToServer ) return;
+  sleep_disable();
+  detachInterrupt(0);
+  binCoverMoves = true;
 }   
 
-//---------------------------------------------------------------------------------------------------
-boolean startingAccelerometer(byte thisAccelerometer){
-     Serial.print("-Trying to plug accelerometer ");
-     byte accelerometerName = readRegister(WHO_AM_I, thisAccelerometer); 
-     
-     if (accelerometerName == ACCELERATOR_NAME ) {
-           initMMA8452(TWO_G, dataRate, thisAccelerometer);  
-           firstAcceleratorPlugged = true;
-           Serial.println("...OK");
-           return true;
-     }
-     else {
-           knownProblemWithAccelerometer = true ;
-           Serial.print("...Fail for:  ");
-           Serial.print(thisAccelerometer);
-           Serial.print(" with error:  ");
-           Serial.println(accelerometerName,HEX);
-           return false;
-     }
+// --------------------------------------------------------------------------------------------------------------
+void sleepSensor(){
+  attachInterrupt(0, motionDetected, CHANGE);
+
+
+  ADCSRA = 0;
+  ACSR = (1<<ACD); //Disable the analog comparator
+  DIDR0 = 0x3F; //Disable digital input buffers on all ADC0-ADC5 pins    
+  sleep_enable();
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+  cli();
+  sei();
+  // turn off brown-out enable in software
+  MCUCR = _BV (BODS) | _BV (BODSE);  // turn on brown-out enable select
+  MCUCR = _BV (BODS);        // this must be done within 4 clock cycles of above
+  sleep_cpu();
+  sleep_disable();   
+
 }
 
-
-   
 
 // --------------------------------------------------------------------------------------------------------------
 void sendDataToServer (unsigned int data)  {
 
-           lastInterrupt         = millis() ;
-            binCoverMoves = false    ;
-            byte sendingBuffer[2];
+  power_spi_enable() ;
+  digitalWrite(nrfPower,HIGH);  
 
-            //shit bat crazy: flip bits if notation is negative number an place them in right place
-            boolean isNegative = (data > 32767);
-            if (isNegative) data = ~data;
-            
-            data = (data << 7) ;
-            data += SENSOR_ADDRESS ;
-            if (isNegative) data += 32768 ; // sign bit
-            Serial.println(data);
-            sendingBuffer[0] = data  >> 8    ;           
-            sendingBuffer[1] = data &  255  ;
-            
-            digitalWrite(nrfPower,HIGH);  delay(15);
-            RF24 radio(CE_PIN,CS_PIN) ;             
+  lastInterrupt         = millis() ;
+  binCoverMoves = false    ;
+  byte sendingBuffer[2];
 
-            radio.begin();
-            radio.setPayloadSize(sizeof(DATA_PAYLOAD));
-            radio.setRetries(15,15);
-            radio.setPALevel(RF24_PA_MAX);
-            radio.setDataRate(RF24_250KBPS);
-            radio.setChannel(1);
-            radio.setCRCLength(RF24_CRC_16);
-            radio.openWritingPipe(baseAddress);
-            radio.startListening() ;
-            radio.stopListening();                        // First, stop listening so we can talk      
-            radio.write( sendingBuffer , radio.getPayloadSize() );
+  //shit bat crazy: flip bits if notation is negative number an place them in right place
+  boolean isNegative = (data > 32767);
+  if (isNegative) data = ~data;
 
-            attachInterrupt(0, motionDetected, CHANGE);
-            radio.powerDown(); delay(1);
-            digitalWrite(nrfPower,LOW);
-            isSendingToServer = false    ;
-            sleepSensor();
- }        
- 
-// --------------------------------------------------------------------------------------------------------------
-void sleepSensor(){
-            ADCSRA = 0;
-            sleep_enable();
-           attachInterrupt(0, motionDetected, CHANGE);
-            set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-            cli();
-            sei();
-            sleep_cpu();
-            sleep_disable();   
-  
-}
+  data = (data << 7) ;
+  data += SENSOR_ADDRESS ;
+  if (isNegative) data += 32768 ; // sign bit
+  sendingBuffer[0] = data  >> 8    ;           
+  sendingBuffer[1] = data &  255  ;
+
+
+
+  RF24 radio(CE_PIN,CS_PIN) ;             
+
+  radio.begin();
+  radio.setPayloadSize(sizeof(DATA_PAYLOAD));
+  radio.setRetries(15,15);
+  radio.setPALevel(RF24_PA_MAX);
+
+  radio.setDataRate(RF24_250KBPS) ;            
+  radio.setChannel(1);
+  radio.setCRCLength(RF24_CRC_16);
+  radio.openWritingPipe(baseAddress);
+  radio.startListening() ;
+  radio.stopListening();                        // First, stop listening so we can talk      
+  radio.write( sendingBuffer , radio.getPayloadSize() );
+
+  radio.powerDown(); 
+  isSendingToServer = false    ;
+  power_spi_disable();
+
+}        
+
+
 
 // --------------------------------------------------------------------------------------------------------------
 void readAccelData(int * destination, unsigned char accelerometer) {
   byte rawData[6];  // x/y/z accel register data stored here
+
+  power_twi_enable();
   readRegisters(0x01, 6, &rawData[0],accelerometer);  // Read the six raw data registers into data array
-  
+  power_twi_disable();
+
   for (int i=0; i<6; i+=2)  {  // loop to calculate 12-bit ADC and g value for each axis 
     destination[i/2] = ((rawData[i] << 8) | rawData[i+1]) >> 4;  // Turn the MSB and LSB into a 12-bit value
     if (rawData[i] > 0x7F)  {  // If the number is negative, we have to make it so manually (no 12-bit data type)
-          destination[i/2] = ~destination[i/2] + 1;
-          destination[i/2] *= -1;  // Transform into negative 2's complement #
+      destination[i/2] = ~destination[i/2] + 1;
+      destination[i/2] *= -1;  // Transform into negative 2's complement #
     }
   }
 }
 
- // ---------------------------------------------------------------------------
-// This function will read the status of the tap source register.   And print if there's been a single or double tap, and on what   axis. 
-void tapHandler(unsigned char accelerometer)
-{
-  byte source = readRegister(0x22,accelerometer);  // Reads the PULSE_SRC register
-  
-  if ((source & 0x10)==0x10) { // If AxX bit is set
-  
-    if ((source & 0x08)==0x08)        Serial.print("    Double Tap (2) on X"); // If DPE (double puls) bit is set // tabbing here for visibility
-    else                                             Serial.print("Single (1) tap on X");
-      
-    if ((source & 0x01)==0x01)       Serial.println(" +"); // If PoIX is set
-    else                                            Serial.println(" -");
-  }
-  
-  if ((source & 0x20)==0x20)    {  // If AxY bit is set
-    if ((source & 0x08)==0x08)        Serial.print("    Double Tap (2) on Y");// If DPE (double puls) bit is set
-    else                                             Serial.print("Single (1) tap on Y");
-      
-    if ((source & 0x02)==0x02)        Serial.println(" +");// If PoIY is set
-    else                                             Serial.println(" -");
-  }
-  
-  if ((source & 0x40)==0x40) { // If AxZ bit is set
-    if ((source & 0x08)==0x08)      Serial.print("    Double Tap (2) on Z");  // If DPE (double puls) bit is set
-    else                                           Serial.print("Single (1) tap on Z");
-    
-    if ((source & 0x04)==0x04)      Serial.println(" +"); // If PoIZ is set
-    else                                           Serial.println(" -");
-  }
-}
 
-
-// ---------------------------------------------------------------------------
-// This function will read the p/l source register and print what direction the sensor is now facing 
-void portraitLandscapeHandler(unsigned char accelerometer)
-{
-  byte pl = readRegister(0x10,accelerometer);  // Reads the PL_STATUS register
-  switch((pl&0x06)>>1)  // Check on the LAPO[1:0] bits
-  {
-    case 0:      Serial.print("Portrait up, ");           break;
-    case 1:      Serial.print("Portrait Down, ");      break;
-    case 2:      Serial.print("Landscape Right, "); break;
-    case 3:      Serial.print("Landscape Left, ");   break;
-  }
-  if (pl&0x01)      Serial.print("Back"); // Check the BAFRO bit
-  else                  Serial.print("Front");
-  if (pl&0x40)      Serial.print(", Z-tilt!");// Check the LO bit
-  Serial.println();
-}
-
-
-
-// --------------------------------------------------------------------------------------------------------------
-void startAccelerometer() {
-    byte c =0;
-       c = readRegister(0x0D,FIRST_ACCELERATOR_ADDRESS);  // Read WHO_AM_I register
-   
-      if (c == 0x2A) // WHO_AM_I should always be 0x2A
-      {  
-              firstAcceleratorPlugged = true;
-              initMMA8452(TWO_G, 0,FIRST_ACCELERATOR_ADDRESS);  // init the accelerometer if communication is OK
-              sendDataToServer(START_SENSOR_OK);
-      }
-      else
-      {
-              Serial.print("Could not connect to MMA8452Q: 0x");
-              Serial.println(c, HEX);
-              sendDataToServer(START_ACCELERATOR_FAILED);
-      }
-}
 
 // --------------------------------------------------------------------------------------------------
-void initMMA8452(byte gResolution, byte dataRate, unsigned char accelerometer)
+void setupAccelerometer(byte gResolution, byte dataRate, unsigned char accelerometer)
 {
-  Serial.println("");
-  
+
+  power_twi_enable();
   setAcceleroToStandby(accelerometer);                         // Must be in standby to change registers
   writeRegister(XYZ_DATA_CFG,   gResolution, accelerometer);   // set to 2G
   writeRegister(CTRL_REG1,     SLEEP_MODE_SAMPLE_RATE_12Hz | WAKE_MODE_SAMPLE_RATE_12Hz          , accelerometer);  
@@ -420,51 +362,59 @@ void initMMA8452(byte gResolution, byte dataRate, unsigned char accelerometer)
   writeRegister(INTERRUPT_WAKE           ,  INTERRUPT_ACTIVE_HIGH | WAKE_ON_MOTION , accelerometer);  // Active high, push-pull interrupts
   writeRegister(INTERRUPT_ENABLED        ,  INTERRUPT_MOTION                       , accelerometer);  
   writeRegister(INTERRUPT_PIN_ASSIGNMENT ,  MOTION_ON_PIN1                         , accelerometer);  // DRDY on INT1, P/L and taps on INT2
- writeRegister(GO_TO_SLEEP_TIMEOUT       ,  SLEEP_IMMEDIATELY                      , accelerometer);
+  writeRegister(GO_TO_SLEEP_TIMEOUT       ,  SLEEP_IMMEDIATELY                      , accelerometer);
 
   /*Serial.print( "CTRL_REG1  -SLEEP/WAKE SAMPLING RATE: ");       Serial.println(  readRegister(CTRL_REG1,accelerometer));   
-  Serial.print( "CTRL_REG2  -SLEEP_MODE_ON: ");                             Serial.println( readRegister(CTRL_REG2       ,accelerometer));   
-  Serial.print( "TIMEOUT TO SLEEP: time to wait before sleep: ");          Serial.println(  readRegister(GO_TO_SLEEP_TIMEOUT,accelerometer));   
-  Serial.print( "INTERRUPT_WAKE  -interrupt setting: ");                         Serial.println(  readRegister(INTERRUPT_WAKE,accelerometer) );   
-  Serial.print( "INTERRUPT ENABLED  -interrupt setting: ");                   Serial.println( readRegister(INTERRUPT_ENABLED,accelerometer) );   
-  Serial.print( "INTERRUPT_PIN_ASSIGNMENT  -interrupt setting: ");   Serial.println(  readRegister(INTERRUPT_PIN_ASSIGNMENT,accelerometer) );   
-  Serial.print( "ACCELERO STATUS: ");                                                   Serial.println(   readRegister(0x0B ,  accelerometer));
-  */
+   Serial.print( "CTRL_REG2  -SLEEP_MODE_ON: ");                             Serial.println( readRegister(CTRL_REG2       ,accelerometer));   
+   Serial.print( "TIMEOUT TO SLEEP: time to wait before sleep: ");          Serial.println(  readRegister(GO_TO_SLEEP_TIMEOUT,accelerometer));   
+   Serial.print( "INTERRUPT_WAKE  -interrupt setting: ");                         Serial.println(  readRegister(INTERRUPT_WAKE,accelerometer) );   
+   Serial.print( "INTERRUPT ENABLED  -interrupt setting: ");                   Serial.println( readRegister(INTERRUPT_ENABLED,accelerometer) );   
+   Serial.print( "INTERRUPT_PIN_ASSIGNMENT  -interrupt setting: ");   Serial.println(  readRegister(INTERRUPT_PIN_ASSIGNMENT,accelerometer) );   
+   Serial.print( "ACCELERO STATUS: ");                                                   Serial.println(   readRegister(0x0B ,  accelerometer));
+   */
   setAcceleroToActive(accelerometer);  // Set to active to start reading
+
+  power_twi_disable();
+
 }
 
 
- // -------------------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------
 // Sets the MMA8452 to standby mode. It must be in standby to change most register settings 
 void setAcceleroToStandby(unsigned char accelerometer) {
-    writeRegister( CTRL_REG1, readRegister( CTRL_REG1, accelerometer ) & ACCELERO_STANDBY, accelerometer );
+  writeRegister( CTRL_REG1, readRegister( CTRL_REG1, accelerometer ) & ACCELERO_STANDBY, accelerometer );
 }
 
 // -------------------------------------------------------------------------------------------------
 // Sets the MMA8452 to active mode;   Needs to be in this mode to output data
 void setAcceleroToActive(unsigned char accelerometer) {
   byte c = readRegister( CTRL_REG1,                                            accelerometer  );
-                writeRegister( CTRL_REG1, c | ACCELERO_ACTIVE, accelerometer );
+  writeRegister( CTRL_REG1, c | ACCELERO_ACTIVE, accelerometer );
 }
 
 // -------------------------------------------------------------------------------------------------
 // Read i registers sequentially, starting at address  into the dest byte array
 void readRegisters(byte address, int i, byte * dest, unsigned char accelerometer)
 {
-  i2cSendStart();                                  i2cWaitForComplete();
-  i2cSendByte((accelerometer<<1));  i2cWaitForComplete(); 	// write 0xB4
-  i2cSendByte(address);                     i2cWaitForComplete(); 	// write register address
-  
+  i2cSendStart();                                  
+  i2cWaitForComplete();
+  i2cSendByte((accelerometer<<1));  
+  i2cWaitForComplete(); 	// write 0xB4
+  i2cSendByte(address);                     
+  i2cWaitForComplete(); 	// write register address
+
   i2cSendStart();
-  i2cSendByte((accelerometer<<1)|0x01);  i2cWaitForComplete();// write 0xB5
+  i2cSendByte((accelerometer<<1)|0x01);  
+  i2cWaitForComplete();// write 0xB5
 
   for (int j=0; j<i; j++)  {
-    i2cReceiveByte(TRUE);    i2cWaitForComplete();
+    i2cReceiveByte(TRUE);    
+    i2cWaitForComplete();
     dest[j] = i2cGetReceivedByte();	// Get MSB result
   }
   i2cWaitForComplete();
   i2cSendStop();
-  
+
   cbi(TWCR, TWEN);	// Disable TWI
   sbi(TWCR, TWEN);	// Enable TWI
 }
@@ -474,22 +424,28 @@ void readRegisters(byte address, int i, byte * dest, unsigned char accelerometer
 byte readRegister(uint8_t address, unsigned char accelerometer)
 {
   byte data;
-  
-  i2cSendStart();                                  i2cWaitForComplete();
-  i2cSendByte((accelerometer<<1));  i2cWaitForComplete();	// write 0xB4
-  i2cSendByte(address);	                     i2cWaitForComplete();// write register address
-  
+
+  i2cSendStart();                                  
+  i2cWaitForComplete();
+  i2cSendByte((accelerometer<<1));  
+  i2cWaitForComplete();	// write 0xB4
+  i2cSendByte(address);	                     
+  i2cWaitForComplete();// write register address
+
   i2cSendStart();
-  
-  i2cSendByte((accelerometer<<1)|0x01);  i2cWaitForComplete(); // write 0xB5
-  i2cReceiveByte(TRUE);                            i2cWaitForComplete();
-  
-  data = i2cGetReceivedByte();	              i2cWaitForComplete();// Get MSB result
+
+  i2cSendByte((accelerometer<<1)|0x01);  
+  i2cWaitForComplete(); // write 0xB5
+  i2cReceiveByte(TRUE);                            
+  i2cWaitForComplete();
+
+  data = i2cGetReceivedByte();	              
+  i2cWaitForComplete();// Get MSB result
   i2cSendStop();
-  
+
   cbi(TWCR, TWEN);	// Disable TWI
   sbi(TWCR, TWEN);	// Enable TWI
-  
+
   return data;
 }
 
@@ -497,9 +453,14 @@ byte readRegister(uint8_t address, unsigned char accelerometer)
 /* Writes a single byte (data) into address */
 void writeRegister(unsigned char address, unsigned char data, unsigned char accelerometer)
 {
-  i2cSendStart();                                  i2cWaitForComplete();
-  i2cSendByte((accelerometer<<1));  i2cWaitForComplete(); // write 0xB4
-  i2cSendByte(address);	                    i2cWaitForComplete(); // write register address
-  i2cSendByte(data);                           i2cWaitForComplete();
+  i2cSendStart();                                  
+  i2cWaitForComplete();
+  i2cSendByte((accelerometer<<1));  
+  i2cWaitForComplete(); // write 0xB4
+  i2cSendByte(address);	                    
+  i2cWaitForComplete(); // write register address
+  i2cSendByte(data);                           
+  i2cWaitForComplete();
   i2cSendStop();
 }
+
